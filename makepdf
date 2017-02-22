@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+SOURCE_DIR="$1"; shift
+OUTPUT="$1"; shift
+TMP="$(mktemp -d)"
+INFO_FILE="$TMP/info.txt"
+declare -a INPUT_FILES
+
+read -p "Author: " AUTHOR
+read -p "Title: " TITLE
+{
+    printf "InfoBegin\n"
+    printf "InfoKey: Title\n"
+    printf "InfoValue: %s\n" "$TITLE"
+    printf "InfoBegin\n"
+    printf "InfoKey: Author\n"
+    printf "InfoValue: %s\n" "$AUTHOR"
+} >> "$INFO_FILE"
+
+PAGE=1
+function traverse {
+    local dir="$1"; shift
+    local depth="$1"; shift
+
+    for entry in "$dir/"*; do
+        local toc_label="$(basename "$entry")"
+        toc_label="${toc_label#*\ -\ }"
+        [ -f "$entry" ] && toc_label="${toc_label%.*}"
+        {
+            printf "BookmarkBegin\n"
+            printf "BookmarkTitle: %s\n" "$toc_label"
+            printf "BookmarkLevel: %s\n" "$depth"
+            printf "BookmarkPageNumber: %s\n" "$PAGE"
+        } >> "$INFO_FILE"
+        if [ -d "$entry" ]; then
+            traverse "$entry" $(( $depth + 1 ))
+        else
+            INPUT_FILES+=("$entry")
+            PAGE=$(( $PAGE + 1 ))
+        fi
+    done
+}
+
+traverse "$SOURCE_DIR" 1
+
+declare -a TMP_FILES
+i=0
+for file in "${INPUT_FILES[@]}"; do
+    TMP_FILE="$TMP/$i.pdf"
+    TMP_FILES+=("$TMP_FILE")
+    convert "$file" "$TMP_FILE"
+    i=$((i+1))
+done
+
+pdftk "${TMP_FILES[@]}" cat output "$TMP/tmp.pdf"
+pdftk "$TMP/tmp.pdf" update_info_utf8 "$INFO_FILE" output "$OUTPUT"
+rm -rf "$TMP"
+
