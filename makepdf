@@ -1,58 +1,117 @@
 #!/usr/bin/env bash
 
-SOURCE_DIR="$1"; shift
-OUTPUT="$1"; shift
-TMP="$(mktemp -d)"
-INFO_FILE="$TMP/info.txt"
-declare -a INPUT_FILES
+dir="$1"; shift
 
-read -p "Author: " AUTHOR
-read -p "Title: " TITLE
-{
-    printf "InfoBegin\n"
-    printf "InfoKey: Title\n"
-    printf "InfoValue: %s\n" "$TITLE"
-    printf "InfoBegin\n"
-    printf "InfoKey: Author\n"
-    printf "InfoValue: %s\n" "$AUTHOR"
-} >> "$INFO_FILE"
+if [[ "$dir" == "--help" ]]; then
+	cat <<END
+makepdf: Creates a single PDF booklet from multiple scanned images in a folder structure like this:
+Usage:   makepdf input_dir
 
-PAGE=1
-function traverse {
-    local dir="$1"; shift
-    local depth="$1"; shift
+  input_dir/
+    01 - Front cover/
+      01 - Front cover outside.png
+      02 - Front cover inside.png
+    02 - Booklet/
+      01 - Booklet front.png
+      02 - Booklet 1-2.png
+      03 - Booklet 3-4.png
+      04 - Booklet 5-6.png
+      05 - Booklet back.png
+    03 - CD/
+      01 - CD front.png
+      02 - CD back.png
+    04 - Back cover/
+      01 - Back cover inside.png
+      02 - Back cover outside.png
 
-    for entry in "$dir/"*; do
-        local toc_label="$(basename "$entry")"
-        toc_label="${toc_label#*\ -\ }"
-        [ -f "$entry" ] && toc_label="${toc_label%.*}"
-        {
-            printf "BookmarkBegin\n"
-            printf "BookmarkTitle: %s\n" "$toc_label"
-            printf "BookmarkLevel: %s\n" "$depth"
-            printf "BookmarkPageNumber: %s\n" "$PAGE"
-        } >> "$INFO_FILE"
-        if [ -d "$entry" ]; then
-            traverse "$entry" $(( $depth + 1 ))
-        else
-            INPUT_FILES+=("$entry")
-            PAGE=$(( $PAGE + 1 ))
-        fi
-    done
+The resulting PDF will contain the folder- and filenames as bookmark titles (without the file extension and leading numerals).
+END
+	exit
+fi
+
+pages=()
+
+infofile="$(mktemp)"
+
+echo "Artist (optional): "
+read artist
+if [[ "$artist" != "" ]]; then
+	echo "InfoBegin" >> "$infofile"
+	echo "InfoKey: Author" >> "$infofile"
+	echo "InfoValue: $artist" >> "$infofile"
+fi
+
+
+echo "Title (optional): "
+read title
+if [[ "$title" != "" ]]; then
+	echo "InfoBegin" >> "$infofile"
+	echo "InfoKey: Title" >> "$infofile"
+	echo "InfoValue: $title" >> "$infofile"
+fi
+
+echo "Output (default=$dir/booklet.pdf): "
+read pdffile
+
+echo "Table of contents:"
+
+level=0
+function processdir {
+	local dir="$1"
+	cd "$dir"
+	level=$(( $level + 1 ))
+	for file in *; do 
+		if [[ -d "$file" ]]; then
+			local title="${file#*\ -\ }"
+			echo "BookmarkBegin" >> "$infofile"
+			echo "BookmarkTitle: $title" >> "$infofile"
+			echo "BookmarkLevel: $level" >> "$infofile"
+			echo "BookmarkPageNumber: $(( ${#pages[@]} + 1 ))" >> "$infofile"
+
+			for _ in $(seq 1 $level); do
+				printf "    "
+			done
+			printf "$title\n"
+
+			processdir "$dir/$file"
+		elif [[ "$file" == *.jpg || "$file" == *.jpeg || "$file" == *.png ]]; then
+			local title="${file#*\ -\ }"
+			title="${title%.*}"
+			echo "BookmarkBegin" >> "$infofile"
+			echo "BookmarkTitle: $title" >> "$infofile"
+			echo "BookmarkLevel: $level" >> "$infofile"
+			echo "BookmarkPageNumber: $(( ${#pages[@]} + 1 ))" >> "$infofile"
+
+			for _ in $(seq 1 $level); do
+				printf "    "
+			done
+
+			printf "$title\n"
+			local pdffile="$(mktemp)"
+			mv "$pdffile" "$pdffile.pdf"
+			pdffile="$pdffile.pdf"
+			convert "$file" "pdf:$pdffile"
+			pages+=("$pdffile")
+		fi
+	done
+	cd ..
+	level=$(( $level - 1 ))
 }
 
-traverse "$SOURCE_DIR" 1
+pwd="$(pwd)"
+cd "$dir"
+processdir "$dir"
+cd "$pwd"
 
-declare -a TMP_FILES
-i=0
-for file in "${INPUT_FILES[@]}"; do
-    TMP_FILE="$TMP/$i.pdf"
-    TMP_FILES+=("$TMP_FILE")
-    convert "$file" "$TMP_FILE"
-    i=$((i+1))
-done
+if [[ "$pdffile" == "" ]]; then
+	pdffile="$dir/booklet.pdf"
+fi
 
-pdftk "${TMP_FILES[@]}" cat output "$TMP/tmp.pdf"
-pdftk "$TMP/tmp.pdf" update_info_utf8 "$INFO_FILE" output "$OUTPUT"
-rm -rf "$TMP"
+echo "Creating final PDF file at $pdffile"
+pdftk "${pages[@]}" cat output "$pdffile"
+pdftk "$pdffile" update_info_utf8 "$infofile" output "$pdffile.tmp"
+rm "$pdffile"
+mv "$pdffile.tmp" "$pdffile"
+
+rm  "${pages[@]}" "$infofile"
 
