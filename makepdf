@@ -29,8 +29,10 @@ END
 	exit
 fi
 
-pages=()
+pages=0
+pdfs=()
 
+tmpfiles=()
 infofile="$(mktemp)"
 
 echo "Artist (optional): "
@@ -66,21 +68,38 @@ function processdir {
 			echo "BookmarkBegin" >> "$infofile"
 			echo "BookmarkTitle: $title" >> "$infofile"
 			echo "BookmarkLevel: $level" >> "$infofile"
-			echo "BookmarkPageNumber: $(( ${#pages[@]} + 1 ))" >> "$infofile"
+			echo "BookmarkPageNumber: $(( $pages + 1 ))" >> "$infofile"
 
 			for _ in $(seq 1 $level); do
 				printf "    "
 			done
 			printf "$title\n"
 
-			processdir "$dir/$file"
+			processdir "$file"
+		elif [[ "$file" == *.pdf ]]; then
+			local title="${file#*\ -\ }"
+			title="${title%.*}"
+			echo "BookmarkBegin" >> "$infofile"
+			echo "BookmarkTitle: $title" >> "$infofile"
+			echo "BookmarkLevel: $level" >> "$infofile"
+			echo "BookmarkPageNumber: $(( $pages + 1 ))" >> "$infofile"
+
+			for _ in $(seq 1 $level); do
+				printf "    "
+			done
+			printf "$title\n"
+			pdfs+=("$file")
+
+			local number_of_pages="$(pdftk "$file" dump_data | grep NumberOfPages)"
+			number_of_pages="${number_of_pages##*: }"
+			pages=$(( $pages +  $number_of_pages ))
 		elif [[ "$file" == *.jpg || "$file" == *.jpeg || "$file" == *.png ]]; then
 			local title="${file#*\ -\ }"
 			title="${title%.*}"
 			echo "BookmarkBegin" >> "$infofile"
 			echo "BookmarkTitle: $title" >> "$infofile"
 			echo "BookmarkLevel: $level" >> "$infofile"
-			echo "BookmarkPageNumber: $(( ${#pages[@]} + 1 ))" >> "$infofile"
+			echo "BookmarkPageNumber: $(( $pages + 1 ))" >> "$infofile"
 
 			for _ in $(seq 1 $level); do
 				printf "    "
@@ -91,7 +110,9 @@ function processdir {
 			mv "$pdffile" "$pdffile.pdf"
 			pdffile="$pdffile.pdf"
 			convert "$file" "pdf:$pdffile"
-			pages+=("$pdffile")
+			pdfs+=("$pdffile")
+			tmpfiles+=("$pdffile")
+			pages=$(( $pages + 1 ))
 		fi
 	done
 	cd ..
@@ -108,10 +129,10 @@ if [[ "$pdffile" == "" ]]; then
 fi
 
 echo "Creating final PDF file at $pdffile"
-pdftk "${pages[@]}" cat output "$pdffile"
+pdftk "${pdfs[@]}" cat output "$pdffile"
 pdftk "$pdffile" update_info_utf8 "$infofile" output "$pdffile.tmp"
 rm "$pdffile"
 mv "$pdffile.tmp" "$pdffile"
 
-rm  "${pages[@]}" "$infofile"
+rm  "${tmpfiles[@]}" "$infofile"
 
