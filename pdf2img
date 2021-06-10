@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+jq_script=$(cat <<-'EOF'
+    [.pages[] | .images[] | .object] as $imageIDs |
+    .objects as $objects | 
+    [$imageIDs[] | { key: ., value: $objects[.] }] as $images | 
+    [$images[] | .value["/SMask"] | values] as $softMasks |
+    $images[] |
+        .key, 
+         if .value["/Filter"] == "/DCTDecode" or .value["/Filter"] == ["/DCTDecode"] then 
+            "jpg" 
+         else 
+            "png" 
+         end,
+        .value["/Width"],
+        .value["/Height"],
+        .value["/BitsPerComponent"],
+        .value["/SMask"] // "None",
+        (if (.value["/ColorSpace"] | type) == "string" then 
+            $objects[.value["/ColorSpace"]] // .value["/ColorSpace"]
+        else 
+            .value["/ColorSpace"] 
+        end) as $colorSpace | if ($colorSpace | type) == "array" then
+            if $colorSpace[0] != "/ICCBased" then
+                "Non-ICCBased color spaces not supported!" | halt_error
+            else
+                $colorSpace[], $objects[$colorSpace[1]]["/N"] 
+            end
+        else
+            $colorSpace
+        end
+EOF
+)
+
+pdf="$1"
+output="$2"
+
+pdfname="$(basename "$pdf")"
+
+echo "PDF: $pdf" >&2
+i=1
+while read -r imageID && \
+      read -r format && \
+      read -r width && \
+      read -r height && \
+      read -r bits && \
+      read -r softMask && \
+      read -r colorSpace; do
+    if [[ "$colorSpace" == '/ICCBased' ]]; then
+        read -r colorSpaceID
+        read -r colorSpaceN
+    fi
+
+    echo "$imageID: $format ${width}x${height} $colorSpace" >&2
+
+    name="$(printf -- '%s/%s-%06d.%s' "$output" "$pdfname" "$i" "$format")"
+
+    if [[ "$format" == "jpg" ]]; then
+        qpdf --show-object="$imageID" --raw-stream-data "$pdf" >"$name"
+    else
+        if [[ "$colorSpace" == '/ICCBased' ]]; then
+            if [[ "$colorSpaceN" == 1 ]]; then
+                magickFormat='gray'
+            elif [[ "$colorSpaceN" == 3 ]]; then
+                magickFormat='RGB'
+            else
+                echo "Unsupported number of color channels: $colorSpaceN"
+                exit 1
+            fi
+        elif [[ "$colorSpace" == '/DeviceGray' ]]; then
+            magickFormat='gray'
+        elif [[ "$colorSpace" == '/DeviceRGB' ]]; then
+            magickFormat='RGB'
+        else
+            echo "Unsupported color space: $colorSpace"
+            exit 1
+        fi
+        qpdf --show-object="$imageID" --filtered-stream-data "$pdf" | convert -size "${width}x${height}" -depth "$bits" "$magickFormat":- "$name"
+        if [[ "$softMask" != "None" ]]; then
+            convert "$name" <(qpdf --show-object="$softMask" --filtered-stream-data "$pdf" | convert -size "${width}x${height}" -depth "$bits" gray:- PNG:-) -alpha off -compose copy-opacity -composite "$name.tmp.png" && mv "$name.tmp.png" "$name"
+        fi
+        if [[ "$colorSpace" == '/ICCBased' ]]; then
+            exiftool -overwrite_original "-icc_profile<="<(qpdf --show-object="$colorSpaceID" --filtered-stream-data "$pdf") "$name"
+        fi
+    fi
+    i=$((i+1))
+done < <(qpdf --json "$pdf" | jq --raw-output -c "$jq_script")

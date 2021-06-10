@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 dir="$1"; shift
 
@@ -31,21 +32,21 @@ fi
 
 pages=0
 pdfs=()
+originals=()
 
-tmpfiles=()
+tmpdir="$(mktemp -d)"
 infofile="$(mktemp)"
 
 echo "Artist (optional): "
-read artist
+read -r artist
 if [[ "$artist" != "" ]]; then
 	echo "InfoBegin" >> "$infofile"
 	echo "InfoKey: Author" >> "$infofile"
 	echo "InfoValue: $artist" >> "$infofile"
 fi
 
-
 echo "Title (optional): "
-read title
+read -r title
 if [[ "$title" != "" ]]; then
 	echo "InfoBegin" >> "$infofile"
 	echo "InfoKey: Title" >> "$infofile"
@@ -53,76 +54,53 @@ if [[ "$title" != "" ]]; then
 fi
 
 echo "Output (default=$dir/booklet.pdf): "
-read pdffile
+read -r pdffile
 
 echo "Table of contents:"
 
 level=0
 function processdir {
-	local dir="$1"
-	cd "$dir"
 	level=$(( $level + 1 ))
-	for file in *; do 
+	for file in "$1/"*; do
+        local name="$(basename "$file")"
+
 		if [[ -d "$file" ]]; then
-			local title="${file#*\ -\ }"
-			echo "BookmarkBegin" >> "$infofile"
-			echo "BookmarkTitle: $title" >> "$infofile"
-			echo "BookmarkLevel: $level" >> "$infofile"
-			echo "BookmarkPageNumber: $(( $pages + 1 ))" >> "$infofile"
+			local title="${name#*\ -\ }"
+			{
+                echo "BookmarkBegin"
+			    echo "BookmarkTitle: $title"
+			    echo "BookmarkLevel: $level"
+			    echo "BookmarkPageNumber: $(( $pages + 1 ))"
+            } >> "$infofile"
 
-			for _ in $(seq 1 $level); do
-				printf "    "
-			done
-			printf "$title\n"
+			printf "%$(( $level * 4 ))s%s\n" "$title"
 
+            mkdir "$tmpdir/$(realpath --relative-to="$dir" "$file")"
 			processdir "$file"
-		elif [[ "$file" == *.pdf ]]; then
-			local title="${file#*\ -\ }"
+		elif [[ "$name" == *.jpg || "$name" == *.jpeg || "$name" == *.png || "$name" == *.tif ]]; then
+			local title="${name#*\ -\ }"
 			title="${title%.*}"
-			echo "BookmarkBegin" >> "$infofile"
-			echo "BookmarkTitle: $title" >> "$infofile"
-			echo "BookmarkLevel: $level" >> "$infofile"
-			echo "BookmarkPageNumber: $(( $pages + 1 ))" >> "$infofile"
+            {
+                echo "BookmarkBegin"
+                echo "BookmarkTitle: $title"
+                echo "BookmarkLevel: $level"
+                echo "BookmarkPageNumber: $(( $pages + 1 ))"
+            } >> "$infofile"
 
-			for _ in $(seq 1 $level); do
-				printf "    "
-			done
-			printf "$title\n"
-			pdfs+=("$file")
+			printf "%$(( $level * 4 ))s%s\n" "$title"
+            
+            local pdffile="$tmpdir/$(realpath --relative-to="$dir" "$file").pdf"
+            img2pdf -o "$pdffile" "$file"
 
-			local number_of_pages="$(pdftk "$file" dump_data | grep NumberOfPages)"
-			number_of_pages="${number_of_pages##*: }"
-			pages=$(( $pages +  $number_of_pages ))
-		elif [[ "$file" == *.jpg || "$file" == *.jpeg || "$file" == *.png ]]; then
-			local title="${file#*\ -\ }"
-			title="${title%.*}"
-			echo "BookmarkBegin" >> "$infofile"
-			echo "BookmarkTitle: $title" >> "$infofile"
-			echo "BookmarkLevel: $level" >> "$infofile"
-			echo "BookmarkPageNumber: $(( $pages + 1 ))" >> "$infofile"
-
-			for _ in $(seq 1 $level); do
-				printf "    "
-			done
-
-			printf "$title\n"
-			local pdffile="$(mktemp)"
-			mv "$pdffile" "$pdffile.pdf"
-			pdffile="$pdffile.pdf"
-			convert "$file" "pdf:$pdffile"
 			pdfs+=("$pdffile")
-			tmpfiles+=("$pdffile")
+			originals+=("$file")
 			pages=$(( $pages + 1 ))
 		fi
 	done
-	cd ..
 	level=$(( $level - 1 ))
 }
 
-pwd="$(pwd)"
-cd "$dir"
 processdir "$dir"
-cd "$pwd"
 
 if [[ "$pdffile" == "" ]]; then
 	pdffile="$dir/booklet.pdf"
@@ -131,8 +109,22 @@ fi
 echo "Creating final PDF file at $pdffile"
 pdftk "${pdfs[@]}" cat output "$pdffile"
 pdftk "$pdffile" update_info_utf8 "$infofile" output "$pdffile.tmp"
-rm "$pdffile"
 mv "$pdffile.tmp" "$pdffile"
 
-rm  "${tmpfiles[@]}" "$infofile"
+rm -r "$tmpdir" "$infofile"
 
+echo "Checking losslessness:"
+tmpdir="$(mktemp -d)"
+pdf2img "$pdffile" "$tmpdir"
+
+while read -r original && read -r new; do
+    echo "Comparing $original vs $new"
+    if [[ "$original" == *.png || "$original" == *.tif ]]; then
+        cmp <(convert "$original" RGBA:-) <(convert "$new" RGBA:-) || { echo "Error: pixel data mismatch!"; exit 1; }
+        cmp <(exiftool -b -icc_profile "$original") <(exiftool -b -icc_profile "$new") || { echo "Error: ICC profile mismatch!"; exit 1; }
+    else
+        cmp "$original" "$new" || { echo "Error!"; exit 1; }
+    fi
+done < <(paste -d '\n' <(printf '%s\n' "${originals[@]}") <(printf '%s\n' "$tmpdir"/*))
+
+rm -r "$tmpdir"
