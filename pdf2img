@@ -23,7 +23,7 @@ jq_script=$(cat <<-'EOF'
             .value["/ColorSpace"] 
         end) as $colorSpace | if ($colorSpace | type) == "array" then
             if $colorSpace[0] != "/ICCBased" then
-                "Non-ICCBased color spaces not supported!" | halt_error
+                "Non-ICCBased color spaces not supported: " + $colorSpace[0] | halt_error
             else
                 $colorSpace[], $objects[$colorSpace[1]]["/N"] 
             end
